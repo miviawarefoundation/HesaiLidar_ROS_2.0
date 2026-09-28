@@ -42,7 +42,11 @@ class NodeManager
 public:
 
   // Initialize ROS nodes based on configuration files
+#ifdef ROS2_FOUND
+  void Init(const YAML::Node& config, rclcpp::Node* node = nullptr);
+#else
   void Init(const YAML::Node& config);
+#endif
   // Start working
   void Start();
   // Stop working

@@ -132,6 +132,8 @@ if($ENV{ROS_VERSION} MATCHES "2")
     include_directories(${rclcpp_INCLUDE_DIRS})
 
     find_package(ament_cmake REQUIRED)
+    find_package(autoware_agnocast_wrapper REQUIRED)
+    find_package(rclcpp_components REQUIRED)
     find_package(sensor_msgs REQUIRED)
     find_package(std_msgs REQUIRED)  
     find_package(rcutils REQUIRED)
@@ -200,10 +202,6 @@ set(INSTALLABLE_LIB_TARGETS
     )
 
 if(${CUDA_FOUND})
-  add_executable(hesai_ros_driver_node
-    node/hesai_ros_driver_node.cu
-    src/manager/node_manager.cc
-    )
   set(LIB_TARGETS
     ${LIB_TARGETS}
     udpParserGpu_lib
@@ -212,19 +210,28 @@ if(${CUDA_FOUND})
     ${INSTALLABLE_LIB_TARGETS}
     udpParserGpu_lib
     )
+endif()
+
+if($ENV{ROS_VERSION} MATCHES "2")
+  add_library(hesai_ros_driver_component SHARED
+    node/hesai_ros_driver_component.cc
+    src/manager/node_manager.cc
+  )
+  set(HESAI_ROS_TARGET hesai_ros_driver_component)
 else()
   add_executable(hesai_ros_driver_node
     node/hesai_ros_driver_node.cc
     src/manager/node_manager.cc
     )
+  set(HESAI_ROS_TARGET hesai_ros_driver_node)
 endif()
-target_link_libraries(hesai_ros_driver_node                   
+target_link_libraries(${HESAI_ROS_TARGET}
             ${YAML_CPP_LIBRARIES}
             ${Boost_LIBRARIES}
             ${LIB_TARGETS}
 )              
 
-target_include_directories(hesai_ros_driver_node PRIVATE
+target_include_directories(${HESAI_ROS_TARGET} PRIVATE
   src/manager
   src/msg/ros_msg
   src/msg/rs_msg
@@ -255,10 +262,12 @@ endif($ENV{ROS_VERSION} MATCHES "1")
 if($ENV{ROS_VERSION} MATCHES "2")
   find_package(ament_index_cpp REQUIRED)
   if(COMMAND ament_target_dependencies)
-    ament_target_dependencies(hesai_ros_driver_node 
+    ament_target_dependencies(${HESAI_ROS_TARGET}
     "ament_index_cpp"
+    "autoware_agnocast_wrapper"
     "rcl_interfaces"
-    "rclcpp" 
+    "rclcpp"
+    "rclcpp_components"
     "rcutils"
     "std_msgs" 
     "sensor_msgs"
@@ -268,8 +277,10 @@ if($ENV{ROS_VERSION} MATCHES "2")
   else()
     set(ROS2_TARGET_DEPENDENCIES
       ament_index_cpp
+      autoware_agnocast_wrapper
       rcl_interfaces
       rclcpp
+      rclcpp_components
       rcutils
       std_msgs
       sensor_msgs
@@ -277,29 +288,39 @@ if($ENV{ROS_VERSION} MATCHES "2")
     )
     foreach(dependency IN LISTS ROS2_TARGET_DEPENDENCIES)
       if(DEFINED ${dependency}_TARGETS AND NOT "${${dependency}_TARGETS}" STREQUAL "")
-        target_link_libraries(hesai_ros_driver_node ${${dependency}_TARGETS})
+        target_link_libraries(${HESAI_ROS_TARGET} ${${dependency}_TARGETS})
       elseif(TARGET ${dependency}::${dependency})
-        target_link_libraries(hesai_ros_driver_node ${dependency}::${dependency})
+        target_link_libraries(${HESAI_ROS_TARGET} ${dependency}::${dependency})
       elseif(DEFINED ${dependency}_LIBRARIES AND NOT "${${dependency}_LIBRARIES}" STREQUAL "")
-        target_link_libraries(hesai_ros_driver_node ${${dependency}_LIBRARIES})
+        target_link_libraries(${HESAI_ROS_TARGET} ${${dependency}_LIBRARIES})
       endif()
 
       if(DEFINED ${dependency}_INCLUDE_DIRS AND NOT "${${dependency}_INCLUDE_DIRS}" STREQUAL "")
-        target_include_directories(hesai_ros_driver_node PUBLIC ${${dependency}_INCLUDE_DIRS})
+        target_include_directories(${HESAI_ROS_TARGET} PUBLIC ${${dependency}_INCLUDE_DIRS})
       endif()
     endforeach()
   endif()
 
   if(COMMAND rosidl_get_typesupport_target)
     rosidl_get_typesupport_target(cpp_typesupport_target "${PROJECT_NAME}" "rosidl_typesupport_cpp")
-    target_link_libraries(hesai_ros_driver_node "${cpp_typesupport_target}")
+    target_link_libraries(${HESAI_ROS_TARGET} "${cpp_typesupport_target}")
   else()
-    rosidl_target_interfaces(hesai_ros_driver_node  ${PROJECT_NAME} "rosidl_typesupport_cpp")
+    rosidl_target_interfaces(${HESAI_ROS_TARGET} ${PROJECT_NAME} "rosidl_typesupport_cpp")
   endif()
 
+  autoware_agnocast_wrapper_setup(${HESAI_ROS_TARGET})
+  autoware_agnocast_wrapper_register_node(${HESAI_ROS_TARGET}
+    PLUGIN "hesai_ros_driver::HesaiRosDriverNode"
+    EXECUTABLE hesai_ros_driver_node
+    ROS2_EXECUTOR MultiThreadedExecutor
+    AGNOCAST_EXECUTOR MultiThreadedAgnocastExecutor
+  )
+
   install(TARGETS
-          hesai_ros_driver_node
-          DESTINATION lib/${PROJECT_NAME})
+          ${HESAI_ROS_TARGET}
+          ARCHIVE DESTINATION lib
+          LIBRARY DESTINATION lib
+          RUNTIME DESTINATION lib/${PROJECT_NAME})
   install(TARGETS
           ${INSTALLABLE_LIB_TARGETS}
           DESTINATION lib)
