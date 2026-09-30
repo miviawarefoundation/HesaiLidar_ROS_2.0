@@ -96,7 +96,32 @@ You can pass CMake arguments to the SDK during compilation to enable/disable spe
 |:-------|:-----|:--------|:------------|
 | `WITH_PTCS_USE` | BOOL | ON | Enable PTC SSL support |
 | `FIND_CUDA` | BOOL | OFF | Enable CUDA GPU acceleration |
+| `HESAI_ENABLE_AGNOCAST` | BOOL | OFF | Publish point clouds directly through Agnocast. Enable only when every immediate downstream subscriber also uses Agnocast. |
 | `CMAKE_CUDA_ARCHITECTURES` | STRING | 61 | CUDA compute capability (e.g., 50/60/61/70/75/80/86/89/90) |
+
+#### Fiat 500e local zero-copy mode
+
+The default ROS 2 build deliberately keeps the Hesai pointcloud publisher on
+`rclcpp`, even when the rest of the workspace is built with
+`ENABLE_AGNOCAST=1`. The Fiat 500e launch composes the driver and the
+pointcloud preprocessors in the same component container, enables
+`use_intra_process_comms`, and publishes the pointcloud as a `unique_ptr`.
+This provides a zero-copy driver-to-preprocessor path without placing an
+Agnocast publisher in front of the current rclcpp-only CropBox subscriber.
+
+Do not attach normal ROS 2 subscribers to raw LiDAR topics in production:
+doing so intentionally activates a DDS delivery path for that diagnostic
+subscriber. RViz and rosbag use are therefore diagnostic modes. Direct
+Agnocast publication can be tested explicitly with:
+
+```bash
+colcon build --packages-select hesai_ros_driver --cmake-clean-cache \
+  --cmake-args -DHESAI_ENABLE_AGNOCAST=ON
+```
+
+That mode is not compatible with the Fiat 500e preprocessing chain until its
+CropBox, distortion-correction and concatenation subscriptions have all been
+migrated to Agnocast.
 
 For more details about SDK compile macros, please refer to [compile_macro_control_description](src/driver/HesaiLidar_SDK_2.0/docs/compile_macro_control_description.md).
 

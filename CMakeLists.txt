@@ -14,6 +14,11 @@ configure_file(
 )
 
 set(WITH_PTCS_USE ON CACHE BOOL "Use Ptcs")
+option(
+  HESAI_ENABLE_AGNOCAST
+  "Publish point clouds directly with Agnocast (requires Agnocast subscribers downstream)"
+  OFF
+)
 # set(FIND_CUDA ON CACHE BOOL "Find CUDA")
 
 if(FIND_CUDA)
@@ -308,13 +313,38 @@ if($ENV{ROS_VERSION} MATCHES "2")
     rosidl_target_interfaces(${HESAI_ROS_TARGET} ${PROJECT_NAME} "rosidl_typesupport_cpp")
   endif()
 
-  autoware_agnocast_wrapper_setup(${HESAI_ROS_TARGET})
-  autoware_agnocast_wrapper_register_node(${HESAI_ROS_TARGET}
-    PLUGIN "hesai_ros_driver::HesaiRosDriverNode"
-    EXECUTABLE hesai_ros_driver_node
-    ROS2_EXECUTOR MultiThreadedExecutor
-    AGNOCAST_EXECUTOR MultiThreadedAgnocastExecutor
-  )
+  # The Fiat 500e LiDAR driver and the current Autoware pointcloud preprocessors
+  # are composed in the same process.  Until every downstream component uses an
+  # Agnocast subscription, keep this publisher on rclcpp: publishing a unique_ptr
+  # with use_intra_process_comms=true gives a zero-copy first hop without creating
+  # an incompatible Agnocast-publisher/rclcpp-subscriber boundary.
+  #
+  # ENABLE_AGNOCAST is workspace-wide, therefore an explicit package option is
+  # required to keep a full ENABLE_AGNOCAST=1 rebuild reproducible.  Direct
+  # Agnocast publication remains available for integration testing.
+  if(HESAI_ENABLE_AGNOCAST)
+    message(STATUS "Hesai pointcloud transport: Agnocast")
+    autoware_agnocast_wrapper_setup(${HESAI_ROS_TARGET})
+    autoware_agnocast_wrapper_register_node(${HESAI_ROS_TARGET}
+      PLUGIN "hesai_ros_driver::HesaiRosDriverNode"
+      EXECUTABLE hesai_ros_driver_node
+      ROS2_EXECUTOR MultiThreadedExecutor
+      AGNOCAST_EXECUTOR MultiThreadedAgnocastExecutor
+    )
+  else()
+    message(STATUS "Hesai pointcloud transport: rclcpp intra-process")
+    set(_HESAI_SAVED_ENABLE_AGNOCAST "$ENV{ENABLE_AGNOCAST}")
+    set(ENV{ENABLE_AGNOCAST} "")
+    autoware_agnocast_wrapper_setup(${HESAI_ROS_TARGET})
+    autoware_agnocast_wrapper_register_node(${HESAI_ROS_TARGET}
+      PLUGIN "hesai_ros_driver::HesaiRosDriverNode"
+      EXECUTABLE hesai_ros_driver_node
+      ROS2_EXECUTOR MultiThreadedExecutor
+      AGNOCAST_EXECUTOR MultiThreadedAgnocastExecutor
+    )
+    set(ENV{ENABLE_AGNOCAST} "${_HESAI_SAVED_ENABLE_AGNOCAST}")
+    unset(_HESAI_SAVED_ENABLE_AGNOCAST)
+  endif()
 
   install(TARGETS
           ${HESAI_ROS_TARGET}
