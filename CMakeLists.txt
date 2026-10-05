@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.5)
 cmake_policy(SET CMP0048 NEW)
 project(hesai_ros_driver)
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+option(HESAI_ENABLE_AGNOCAST "Enable Agnocast integration" OFF)
+if(HESAI_ENABLE_AGNOCAST)
+  message(FATAL_ERROR "HesaiRosDriverNode supports standard rclcpp_components only")
+endif()
+
 #=======================================
 # Version information
 #=======================================
@@ -122,6 +128,7 @@ endif($ENV{ROS_VERSION} MATCHES "1")
 if($ENV{ROS_VERSION} MATCHES "2")
 
   find_package(rclcpp QUIET)
+  find_package(rclcpp_components REQUIRED)
   if(rclcpp_FOUND)
 
     message(=============================================================)
@@ -254,6 +261,27 @@ endif($ENV{ROS_VERSION} MATCHES "1")
 
 if($ENV{ROS_VERSION} MATCHES "2")
   find_package(ament_index_cpp REQUIRED)
+
+  add_library(hesai_ros_driver_component SHARED
+    node/hesai_ros_driver_component.cc
+  )
+  target_link_libraries(hesai_ros_driver_component
+    ${YAML_CPP_LIBRARIES}
+    ${Boost_LIBRARIES}
+    ${LIB_TARGETS}
+  )
+  target_include_directories(hesai_ros_driver_component PRIVATE
+    node
+    src/manager
+    src/msg/ros_msg
+    src/msg/rs_msg
+    src/utility
+    ${CMAKE_CURRENT_BINARY_DIR}
+  )
+  ament_target_dependencies(hesai_ros_driver_component
+    ament_index_cpp rcl_interfaces rclcpp rclcpp_components rcutils
+    std_msgs sensor_msgs rclcpp_action
+  )
   if(COMMAND ament_target_dependencies)
     ament_target_dependencies(hesai_ros_driver_node 
     "ament_index_cpp"
@@ -297,9 +325,25 @@ if($ENV{ROS_VERSION} MATCHES "2")
     rosidl_target_interfaces(hesai_ros_driver_node  ${PROJECT_NAME} "rosidl_typesupport_cpp")
   endif()
 
+  if(COMMAND rosidl_get_typesupport_target)
+    target_link_libraries(hesai_ros_driver_component "${cpp_typesupport_target}")
+  else()
+    rosidl_target_interfaces(
+      hesai_ros_driver_component ${PROJECT_NAME} "rosidl_typesupport_cpp")
+  endif()
+
+  rclcpp_components_register_nodes(hesai_ros_driver_component
+    "hesai_ros_driver::HesaiRosDriverNode"
+  )
+
   install(TARGETS
           hesai_ros_driver_node
           DESTINATION lib/${PROJECT_NAME})
+  install(TARGETS
+          hesai_ros_driver_component
+          ARCHIVE DESTINATION lib
+          LIBRARY DESTINATION lib
+          RUNTIME DESTINATION bin)
   install(TARGETS
           ${INSTALLABLE_LIB_TARGETS}
           DESTINATION lib)
