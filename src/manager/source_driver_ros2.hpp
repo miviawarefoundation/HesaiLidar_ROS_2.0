@@ -44,6 +44,8 @@
 #include <memory>
 #include <chrono>
 #include <string>
+#include <stdexcept>
+#include <time.h>
 #include <functional>
 #include <boost/thread.hpp>
 #include "source_drive_common.hpp"
@@ -105,6 +107,9 @@ protected:
   // double From_g_To_ms2(double g);
   // Convert Angular Velocity from degree/s to radian/s
   // double From_degs_To_rads(double degree);
+  static double GetTaiUtcOffsetSeconds();
+  double ToUtcTimestamp(double timestamp) const;
+
   std::string frame_id_;
 
   rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr crt_sub_;
@@ -120,6 +125,9 @@ protected:
 
   //spin thread while Receive data from ROS topic
   boost::thread* subscription_spin_thread_{nullptr};
+
+  bool sensor_timestamp_is_tai_{false};
+  double tai_utc_offset_seconds_{0.0};
 };
 inline void SourceDriver::Init(const YAML::Node& config)
 {
@@ -133,6 +141,23 @@ inline void SourceDriver::Init(const YAML::Node& config, rclcpp::Node& node)
   DriveYamlParam yaml_param;
   yaml_param.GetDriveYamlParam(config, driver_param);
   frame_id_ = driver_param.input_param.frame_id;
+  YamlRead<bool>(config["driver"], "sensor_timestamp_is_tai", sensor_timestamp_is_tai_, false);
+
+  if (sensor_timestamp_is_tai_) {
+    if (driver_param.decoder_param.use_timestamp_type != 0) {
+      throw std::runtime_error(
+        "sensor_timestamp_is_tai requires use_timestamp_type: 0");
+    }
+    tai_utc_offset_seconds_ = GetTaiUtcOffsetSeconds();
+    if (tai_utc_offset_seconds_ < 1.0 || tai_utc_offset_seconds_ > 100.0) {
+      throw std::runtime_error(
+        "CLOCK_TAI - CLOCK_REALTIME returned an invalid UTC offset");
+    }
+    RCLCPP_INFO(
+      node.get_logger(),
+      "Converting Hesai hardware timestamps from TAI to UTC (offset %.0f s)",
+      tai_utc_offset_seconds_);
+  }
 
   if (driver_param.input_param.send_point_cloud_ros) {
     pub_ = node.create_publisher<sensor_msgs::msg::PointCloud2>(driver_param.input_param.ros_send_point_topic, 10);
@@ -266,6 +291,34 @@ inline void SourceDriver::SendPacketOneByOne(const UdpPacket& msg, double timest
 {
   every_pkt_pub_->publish(ToRosMsg(msg, timestamp));
 }
+inline double SourceDriver::GetTaiUtcOffsetSeconds()
+{
+#ifdef CLOCK_TAI
+  timespec tai{};
+  timespec utc{};
+
+  if (clock_gettime(CLOCK_TAI, &tai) != 0) {
+    throw std::runtime_error("clock_gettime(CLOCK_TAI) failed");
+  }
+  if (clock_gettime(CLOCK_REALTIME, &utc) != 0) {
+    throw std::runtime_error("clock_gettime(CLOCK_REALTIME) failed");
+  }
+
+  const double tai_seconds =
+    static_cast<double>(tai.tv_sec) + static_cast<double>(tai.tv_nsec) * 1e-9;
+  const double utc_seconds =
+    static_cast<double>(utc.tv_sec) + static_cast<double>(utc.tv_nsec) * 1e-9;
+  return std::round(tai_seconds - utc_seconds);
+#else
+  throw std::runtime_error("CLOCK_TAI is not supported on this platform");
+#endif
+}
+
+inline double SourceDriver::ToUtcTimestamp(double timestamp) const
+{
+  return sensor_timestamp_is_tai_ ? timestamp - tai_utc_offset_seconds_ : timestamp;
+}
+
 inline sensor_msgs::msg::PointCloud2 SourceDriver::ToRosMsg(const LidarDecodedFrame<LidarPointXYZIRT>& frame, const std::string& frame_id)
 {
   sensor_msgs::msg::PointCloud2 ros_msg;
@@ -273,8 +326,8 @@ inline sensor_msgs::msg::PointCloud2 SourceDriver::ToRosMsg(const LidarDecodedFr
   uint32_t packet_number = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.packet_num : frame.multi_packet_num;
   LidarPointXYZIRT *pPoints = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.points : frame.multi_points;
   int frame_index = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.frame_index : frame.multi_frame_index;
-  double frame_start_timestamp = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.frame_start_timestamp : frame.multi_frame_start_timestamp;
-  double frame_end_timestamp = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.frame_end_timestamp : frame.multi_frame_end_timestamp;
+  double frame_start_timestamp = ToUtcTimestamp((frame.fParam.IsMultiFrameFrequency() == 0) ? frame.frame_start_timestamp : frame.multi_frame_start_timestamp);
+  double frame_end_timestamp = ToUtcTimestamp((frame.fParam.IsMultiFrameFrequency() == 0) ? frame.frame_end_timestamp : frame.multi_frame_end_timestamp);
   const char *prefix = (frame.fParam.IsMultiFrameFrequency() == 0) ? "raw" : "multi";
   int fields = 6;
   ros_msg.fields.clear();
@@ -309,7 +362,7 @@ inline sensor_msgs::msg::PointCloud2 SourceDriver::ToRosMsg(const LidarDecodedFr
     *iter_z_ = point.z;
     *iter_intensity_ = point.intensity;
     *iter_ring_ = point.ring;
-    *iter_timestamp_ = point.timestamp;
+    *iter_timestamp_ = ToUtcTimestamp(point.timestamp);
     ++iter_x_;
     ++iter_y_;
     ++iter_z_;
@@ -332,6 +385,7 @@ inline sensor_msgs::msg::PointCloud2 SourceDriver::ToRosMsg(const LidarDecodedFr
 }
 
 inline hesai_ros_driver::msg::UdpPacket SourceDriver::ToRosMsg(const UdpPacket& ros_msg, double timestamp) {
+  timestamp = ToUtcTimestamp(timestamp);
   hesai_ros_driver::msg::UdpPacket rawpacket;
   rawpacket.size = ros_msg.packet_len;
   rawpacket.data.resize(ros_msg.packet_len);
@@ -341,6 +395,7 @@ inline hesai_ros_driver::msg::UdpPacket SourceDriver::ToRosMsg(const UdpPacket& 
   return rawpacket;
 }
 inline hesai_ros_driver::msg::UdpFrame SourceDriver::ToRosMsg(const UdpFrame_t& ros_msg, double timestamp) {
+  timestamp = ToUtcTimestamp(timestamp);
   hesai_ros_driver::msg::UdpFrame rs_msg;
   for (size_t i = 0 ; i < ros_msg.size(); i++) {
     hesai_ros_driver::msg::UdpPacket rawpacket;
@@ -395,10 +450,11 @@ inline hesai_ros_driver::msg::Firetime SourceDriver::ToRosMsg(const double *fire
 inline sensor_msgs::msg::Imu SourceDriver::ToRosMsg(const LidarImuData &imu_config_)
 {
   sensor_msgs::msg::Imu ros_msg;
-  auto sec = (uint64_t)floor(imu_config_.timestamp);
+  const double timestamp = ToUtcTimestamp(imu_config_.timestamp);
+  auto sec = (uint64_t)floor(timestamp);
   if (sec <= std::numeric_limits<int32_t>::max()) {
-    ros_msg.header.stamp.sec = (uint32_t)floor(imu_config_.timestamp);
-    ros_msg.header.stamp.nanosec = (uint32_t)round((imu_config_.timestamp - ros_msg.header.stamp.sec) * 1e9);
+    ros_msg.header.stamp.sec = (uint32_t)floor(timestamp);
+    ros_msg.header.stamp.nanosec = (uint32_t)round((timestamp - ros_msg.header.stamp.sec) * 1e9);
   } else {
     printf("does not support timestamps greater than 19 January 2038 03:14:07 (now %lf)\n", imu_config_.timestamp);
   }
